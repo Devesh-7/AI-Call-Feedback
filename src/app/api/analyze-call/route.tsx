@@ -1,6 +1,7 @@
 // src/app/api/analyze-call/route.ts
 import { NextResponse } from 'next/server';
-import { DeepgramClient, PrerecordedTranscriptionOptions } from '@deepgram/sdk';
+// Remove PrerecordedTranscriptionOptions from the import
+import { DeepgramClient } from '@deepgram/sdk';
 
 // Initialize Deepgram client for transcription
 const deepgram = new DeepgramClient(process.env.DEEPGRAM_API_KEY || "");
@@ -45,13 +46,17 @@ export async function POST(request: Request) {
     try {
       const audioBuffer = Buffer.from(await audioFile.arrayBuffer());
 
+      
+      const transcriptionOptions = {
+        model: 'nova-2',
+        smart_format: true,
+        punctuate: true,
+       
+      };
+
       const { result, error: deepgramError } = await deepgram.listen.prerecorded.transcribeFile(
         audioBuffer,
-        {
-          model: 'nova-2', // Using a capable Deepgram model
-          smart_format: true,
-          punctuate: true,
-        } as PrerecordedTranscriptionOptions
+        transcriptionOptions 
       );
 
       if (deepgramError) {
@@ -71,36 +76,32 @@ export async function POST(request: Request) {
       transcript = result?.results.channels[0].alternatives[0].transcript || "";
       console.log("Deepgram transcription completed successfully.");
 
-    } catch (transcriptionProcessingError: unknown) { // Handles errors not directly from deepgramError object
+    } catch (transcriptionProcessingError: unknown) {
       console.error("Unexpected error during Deepgram transcription process:", transcriptionProcessingError);
       const details = transcriptionProcessingError instanceof Error ? transcriptionProcessingError.message : String(transcriptionProcessingError);
       return NextResponse.json({ error: "Audio transcription processing error (Deepgram).", details }, { status: 500 });
     }
 
-    // Analysis results are currently using placeholder data.
     console.log("Generating placeholder analysis results. Transcript length:", transcript.length);
 
     const mockedScores: Record<string, number> = {};
     callEvaluationParameters.forEach(param => {
       if (param.inputType === "PASS_FAIL") {
-        mockedScores[param.key] = (transcript.length > 10 && Math.random() > 0.3) ? param.weight : 0; // Slightly more varied mock
+        mockedScores[param.key] = (transcript.length > 10 && Math.random() > 0.3) ? param.weight : 0;
       } else if (param.inputType === "SCORE") {
-        mockedScores[param.key] = Math.floor(Math.random() * (param.weight * 0.6)) + Math.floor(param.weight * 0.2); // Scores distributed
+        mockedScores[param.key] = Math.floor(Math.random() * (param.weight * 0.6)) + Math.floor(param.weight * 0.2);
       }
     });
-    // Specific overrides for mock data consistency
     if (transcript.toLowerCase().includes("hello") || transcript.toLowerCase().includes("hi")) {
         mockedScores["greeting"] = 5;
     } else {
         mockedScores["greeting"] = 0;
     }
-    mockedScores["callEtiquette"] = Math.min(15, 8 + Math.floor(transcript.length / 50)); // Example: longer transcript implies more etiquette shown
-
+    mockedScores["callEtiquette"] = Math.min(15, 8 + Math.floor(transcript.length / 50));
 
     const overallFeedback = `PLACEHOLDER FEEDBACK: Transcript processed (length: ${transcript.length} characters). Evaluation summary pending full AI analysis.`;
     const observation = `PLACEHOLDER OBSERVATION: Key phrases noted from transcript. Example start: "${transcript.substring(0, 40)}...". Further sentiment analysis pending.`;
     
-    // Simulate a brief processing delay
     await new Promise(resolve => setTimeout(resolve, 500));
 
     const apiResponse = {
@@ -112,7 +113,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json(apiResponse, { status: 200 });
 
-  } catch (error: unknown) { // Catches errors from formData parsing or other unexpected issues
+  } catch (error: unknown) {
     const rawErrorMessage = error instanceof Error ? error.message : String(error);
     console.error("Critical error in API endpoint /api/analyze-call:", rawErrorMessage, error);
     return NextResponse.json({ error: "An unexpected server error occurred processing the request.", details: rawErrorMessage }, { status: 500 });
