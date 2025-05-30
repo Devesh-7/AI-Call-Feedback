@@ -1,11 +1,11 @@
 // src/app/api/analyze-call/route.ts
 import { NextResponse } from 'next/server';
+import OpenAI from 'openai'; // Re-enable OpenAI import
 
-// import OpenAI from 'openai';
-
-// const openai = new OpenAI({
-//   apiKey: process.env.OPENAI_API_KEY,
-// });
+// Re-enable OpenAI client initialization
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 interface CallEvaluationParameter {
   key: string;
@@ -28,13 +28,53 @@ const callEvaluationParameters: CallEvaluationParameter[] = [
   {key: "fatalToneLanguage", name: "Tone & Language", weight: 15, desc: "No abusive or threatening speech", inputType: "PASS_FAIL" }
 ];
 
+async function getLLMResponse(prompt: string, model: string = "gpt-3.5-turbo"): Promise<string> {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: model,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.3,
+      max_tokens: 150,
+    });
+    return completion.choices[0]?.message?.content?.trim() || "";
+  } catch (error) {
+    console.error(`Error calling OpenAI API (${model}):`, error);
+    if (error instanceof OpenAI.APIError && error.status === 429) {
+        return "ERROR_QUOTA";
+    }
+    return "ERROR_API";
+  }
+}
+
+function parseNumericScore(llmResponseText: string, weight: number, inputType: "PASS_FAIL" | "SCORE"): number {
+  if (llmResponseText.startsWith("ERROR_")) return 0;
+
+  const numericMatch = llmResponseText.match(/-?\d+/);
+  let score = 0;
+
+  if (numericMatch) {
+    score = parseInt(numericMatch[0], 10);
+  } else {
+    if (inputType === "PASS_FAIL") {
+        const lowerResponse = llmResponseText.toLowerCase();
+        if (lowerResponse.includes("pass") || lowerResponse.includes("yes") || lowerResponse.includes(String(weight))) return weight;
+        if (lowerResponse.includes("fail") || lowerResponse.includes("no") || lowerResponse.includes("0")) return 0;
+    }
+    return 0;
+  }
+
+  if (inputType === "PASS_FAIL") {
+    return score > 0 ? weight : 0;
+  } else {
+    return Math.max(0, Math.min(score, weight));
+  }
+}
+
 export async function POST(request: Request) {
-  
-  // API Key check is less critical now if we're fully mocking, but good to keep if you might re-enable
-  // if (!process.env.OPENAI_API_KEY) {
-  //   console.error("OpenAI API key not configured.");
-  //   return NextResponse.json({ error: "Server configuration error." }, { status: 500 });
-  // }
+  if (!process.env.OPENAI_API_KEY) {
+    console.error("OpenAI API key not configured.");
+    return NextResponse.json({ error: "Server configuration error. OpenAI API key is missing." }, { status: 500 });
+  }
 
   try {
     const formData = await request.formData();
@@ -44,74 +84,99 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "No audio file uploaded." }, { status: 400 });
     }
 
-    // --- MOCK TRANSCRIPTION (from previous step) ---
-    console.log("Using MOCKED transcript.");
-    const transcript = `Agent: Hello, thank you for calling Company X, my name is Alex. How can I help you today?
-Customer: Hi Alex, I'm calling about a charge on my bill that I don't understand. It's for $25.
-Agent: I can certainly look into that for you. Could I please have your account number or the phone number associated with your account?
-Customer: Sure, my phone number is 555-123-4567.
-Agent: Thank you. One moment while I pull up your account... Okay, I see the charge. It appears to be for the premium widget service you signed up for last month.
-Customer: I don't remember signing up for that! Can you tell me more?
-Agent: Yes, it looks like it was added on the 15th. Our records show it was an online activation.
-Customer: I definitely didn't do that. I want it removed and a refund.
-Agent: I understand your frustration. Let me see what I can do about removing the service and processing a credit for you. I need to check a few things.
-Customer: Okay, please do. I expect this to be resolved.
-Agent: I appreciate your patience. Yes, I can remove the premium widget service immediately and I've processed a credit of $25 back to your account. It should reflect in 3-5 business days. Is there anything else I can assist you with today?
-Customer: No, that's great. Thank you for fixing it, Alex.
-Agent: You're very welcome! Thank you for calling Company X. Have a great day!
-Customer: You too, bye.`;
-    
-// --- END OF MOCK TRANSCRIPTION ---
+    // --- Live Transcription with OpenAI Whisper ---
+    console.log(`Transcribing audio file: ${audioFile.name} using Whisper...`);
+    let transcript = "";
+    try {
+        const transcriptionResponse = await openai.audio.transcriptions.create({
+            file: audioFile,
+            model: 'whisper-1',
+        });
+        transcript = transcriptionResponse.text;
+        console.log("Whisper transcription successful.");
+    } catch (transcriptionError) {
+        console.error("Whisper transcription failed:", transcriptionError);
+        if (transcriptionError instanceof OpenAI.APIError && transcriptionError.status === 429) {
+            return NextResponse.json({ error: "OpenAI API quota exceeded during transcription. Please check your billing.", details: transcriptionError.message }, { status: 429 });
+        }
+        return NextResponse.json({ error: "Audio transcription failed.", details: (transcriptionError as Error).message }, { status: 500 });
+    }
+    // --- End of Live Transcription ---
 
-    // --- FULLY MOCKING AI ANALYSIS DUE TO QUOTA ISSUES ---
-    console.log("Using FULLY MOCKED AI analysis results due to OpenAI quota issues.");
 
-    const mockedScores: Record<string, number> = {};
-    callEvaluationParameters.forEach(param => {
-      if (param.inputType === "PASS_FAIL") {
-        // Example: Randomly pass or fail for mocked data
-        mockedScores[param.key] = Math.random() > 0.3 ? param.weight : 0; // More likely to pass
-      } else if (param.inputType === "SCORE") {
-        // Example: Random score within the weight for mocked data
-        mockedScores[param.key] = Math.floor(Math.random() * (param.weight * 0.8)) + Math.floor(param.weight * 0.2); // Score mostly in upper range
+    const generatedScores: Record<string, number> = {};
+    let analysisHadQuotaError = false;
+
+    console.log("Starting AI analysis for scores using GPT...");
+    for (const param of callEvaluationParameters) {
+      const scorePrompt = `You are a call quality analyst. Based on the following transcript, evaluate the parameter: "${param.name}".
+Description: "${param.desc}".
+The transcript is:
+"""
+${transcript}
+"""
+This parameter is of type "${param.inputType}".
+If type is "PASS_FAIL", the score must be either 0 (Fail) or ${param.weight} (Pass).
+If type is "SCORE", the score must be a number between 0 and ${param.weight}.
+Strictly provide only the numerical score. Score:`;
+
+      const llmScoreResponse = await getLLMResponse(scorePrompt);
+      if (llmScoreResponse === "ERROR_QUOTA") {
+          analysisHadQuotaError = true;
+          console.warn(`Quota error for ${param.name}. Score set to 0.`);
+          generatedScores[param.key] = 0;
+          // If one score fails due to quota, we might want to stop further API calls for scores
+          // to save on potential (non-existent) quota. Or continue and let them default.
+          // For now, we'll just mark the error and let others try, then handle feedback/obs.
+      } else if (llmScoreResponse === "ERROR_API") {
+          console.warn(`API error for ${param.name}. Score set to 0.`);
+          generatedScores[param.key] = 0;
+      } else {
+        generatedScores[param.key] = parseNumericScore(llmScoreResponse, param.weight, param.inputType);
       }
-    });
-    // Ensure some specific scores for variety if desired for the mock
-    mockedScores["greeting"] = 5;
-    mockedScores["callEtiquette"] = 12;
-    mockedScores["fatalTapeDiscloser"] = 0;
+      console.log(`Score for ${param.name}: ${generatedScores[param.key]} (LLM raw: "${llmScoreResponse}")`);
+    }
 
+    let overallFeedback = "Overall feedback could not be generated due to API issues.";
+    let observation = "Observations could not be generated due to API issues.";
 
-    const overallFeedback = "MOCKED: The agent handled the call professionally and resolved the customer's issue effectively regarding the bill charge. Tone was empathetic.";
-    const observation = "MOCKED: Customer was initially frustrated about an incorrect charge but was satisfied after the agent provided a quick resolution and refund.";
-    // --- END OF FULLY MOCKED AI ANALYSIS ---
+    if (analysisHadQuotaError) {
+        overallFeedback = "Overall feedback not generated due to API quota limits reached during scoring.";
+        observation = "Observations not generated due to API quota limits reached during scoring.";
+    } else {
+        // Only proceed if no quota errors during scoring
+        console.log("Generating overall feedback with GPT...");
+        const feedbackPrompt = `Based on the following call transcript, provide a concise overall feedback (1-2 sentences) for the agent's performance.
+Transcript:
+"""
+${transcript}
+"""
+Overall Feedback:`;
+        overallFeedback = await getLLMResponse(feedbackPrompt);
+        if (overallFeedback.startsWith("ERROR_")) overallFeedback = "Overall feedback generation failed due to API error.";
 
-
-    // Simulate a small delay as if AI processing happened
-    await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second delay
-
+        console.log("Generating observation with GPT...");
+        const observationPrompt = `Based on the following call transcript, provide a concise observation (1-2 sentences) about key events or customer sentiments.
+Transcript:
+"""
+${transcript}
+"""
+Observation:`;
+        observation = await getLLMResponse(observationPrompt);
+        if (observation.startsWith("ERROR_")) observation = "Observation generation failed due to API error.";
+    }
 
     const apiResponse = {
       transcript: transcript,
-      scores: mockedScores,
+      scores: generatedScores,
       overallFeedback: overallFeedback,
       observation: observation
     };
 
     return NextResponse.json(apiResponse, { status: 200 });
 
-   } catch (error) { // Removed ': any'
-    let errorMessage = "An unknown error occurred";
-    if (error instanceof Error) {
-        errorMessage = error.message;
-    } else if (typeof error === 'string') {
-        errorMessage = error;
-    }
-    // For OpenAI specific errors, you had a good check before:
-    if (error instanceof OpenAI.APIError) { // Assuming OpenAI is still imported
-        console.error("OpenAI API Error in /api/analyze-call:", error.message);
-        return NextResponse.json({ error: "OpenAI API Error", details: error.message }, { status: error.status || 500 });
-    }
-    console.error("Error in /api/analyze-call (fully mocked or other):", errorMessage);
-    return NextResponse.json({ error: "Failed to process audio.", details: errorMessage }, { status: 500 });
+  } catch (error: any) { // Catch for unexpected errors in the main POST function
+    console.error("Critical unexpected error in /api/analyze-call:", error.message);
+    return NextResponse.json({ error: "An unexpected server error occurred.", details: error.message }, { status: 500 });
+  }
 }
