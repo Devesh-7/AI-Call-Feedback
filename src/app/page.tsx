@@ -68,31 +68,43 @@ export default function HomePage() {
     formData.append('audioFile', selectedFile);
 
     try {
-      const response = await fetch('/api/analyze-call', {
-        method: 'POST',
-        body: formData,
-      });
+       const response = await fetch('/api/analyze-call', {
+      method: 'POST',
+      body: formData,
+    });
 
-      if (!response.ok) {
-        let errorMessage = `API Error: ${response.status} ${response.statusText}`;
-        try {
-          const errorData = await response.json();
-          errorMessage = errorData.message || errorData.error || errorMessage;
-        } catch (e) {
-          // Ignore if error response is not JSON
+    if (!response.ok) {
+      let errorMessage = `API Error: ${response.status} ${response.statusText}`;
+      try {
+        const errorData = await response.json();
+        // Assuming errorData might have a structure like { message: string } or { error: string }
+        // And that errorData itself might be of any type if parsing fails or if it's not structured.
+        if (typeof errorData === 'object' && errorData !== null) {
+            errorMessage = (errorData as any).message || (errorData as any).error || errorMessage;
         }
-        throw new Error(errorMessage);
+      } catch (_e) { // Use _e to indicate it's intentionally not used further in this block
+        // console.warn("Could not parse error response as JSON:", _e); // Optional: log if needed
+        // If parsing fails, errorMessage remains the default response.statusText
       }
-
-      const data: ApiFeedbackResponse = await response.json();
-      setFeedback(data);
-
-    } catch (err: any) {
-      console.error("Failed to process audio:", err);
-      setError(err.message || "An unexpected error occurred. Please try again.");
-    } finally {
-      setIsLoading(false);
+      throw new Error(errorMessage);
     }
+
+    const data: ApiFeedbackResponse = await response.json();
+    setFeedback(data);
+
+  } catch (err) { // Removed ': any'
+    let detailedErrorMessage = "An unexpected error occurred. Please try again.";
+    if (err instanceof Error) {
+        detailedErrorMessage = err.message;
+    } else if (typeof err === 'string') { // Handle if the error thrown was just a string
+        detailedErrorMessage = err;
+    }
+    // Log the original error object (err) as it might contain more info than just the message
+    console.error("Failed to process audio catch block:", err);
+    setError(detailedErrorMessage);
+  } finally {
+    setIsLoading(false);
+  }
   };
 
   return (
@@ -119,7 +131,7 @@ export default function HomePage() {
           onDrop={(event) => {
             event.preventDefault();
             setIsDragging(false);
-            if (isLoading) return; // Don't process if already loading
+            if (isLoading) return; 
 
             if (event.dataTransfer.files && event.dataTransfer.files.length > 0) {
               processFile(event.dataTransfer.files[0]);
@@ -131,7 +143,7 @@ export default function HomePage() {
             type="file"
             accept=".mp3,.wav"
             onChange={handleFileChange}
-            className={styles.fileInput} // This will be visually hidden by CSS
+            className={styles.fileInput} 
             disabled={isLoading}
             id="fileInput"
           />

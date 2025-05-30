@@ -1,6 +1,6 @@
 // src/app/api/analyze-call/route.ts
 import { NextResponse } from 'next/server';
-// We can comment out OpenAI import if no actual calls are made
+
 // import OpenAI from 'openai';
 
 // const openai = new OpenAI({
@@ -29,6 +29,7 @@ const callEvaluationParameters: CallEvaluationParameter[] = [
 ];
 
 export async function POST(request: Request) {
+  
   // API Key check is less critical now if we're fully mocking, but good to keep if you might re-enable
   // if (!process.env.OPENAI_API_KEY) {
   //   console.error("OpenAI API key not configured.");
@@ -59,7 +60,8 @@ Agent: I appreciate your patience. Yes, I can remove the premium widget service 
 Customer: No, that's great. Thank you for fixing it, Alex.
 Agent: You're very welcome! Thank you for calling Company X. Have a great day!
 Customer: You too, bye.`;
-    // --- END OF MOCK TRANSCRIPTION ---
+    
+// --- END OF MOCK TRANSCRIPTION ---
 
     // --- FULLY MOCKING AI ANALYSIS DUE TO QUOTA ISSUES ---
     console.log("Using FULLY MOCKED AI analysis results due to OpenAI quota issues.");
@@ -98,8 +100,18 @@ Customer: You too, bye.`;
 
     return NextResponse.json(apiResponse, { status: 200 });
 
-  } catch (error: any) {
-    console.error("Error in /api/analyze-call (fully mocked):", error.message);
-    return NextResponse.json({ error: "Failed to process audio (mocked).", details: error.message }, { status: 500 });
-  }
+   } catch (error) { // Removed ': any'
+    let errorMessage = "An unknown error occurred";
+    if (error instanceof Error) {
+        errorMessage = error.message;
+    } else if (typeof error === 'string') {
+        errorMessage = error;
+    }
+    // For OpenAI specific errors, you had a good check before:
+    if (error instanceof OpenAI.APIError) { // Assuming OpenAI is still imported
+        console.error("OpenAI API Error in /api/analyze-call:", error.message);
+        return NextResponse.json({ error: "OpenAI API Error", details: error.message }, { status: error.status || 500 });
+    }
+    console.error("Error in /api/analyze-call (fully mocked or other):", errorMessage);
+    return NextResponse.json({ error: "Failed to process audio.", details: errorMessage }, { status: 500 });
 }
