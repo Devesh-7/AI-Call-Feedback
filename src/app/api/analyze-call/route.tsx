@@ -64,15 +64,23 @@ export async function POST(request: Request) {
         transcriptionOptions
       );
 
-      if (deepgramError) {
+        if (deepgramError) {
         console.error("Deepgram transcription service error:", deepgramError);
         let errorDetails = "Transcription service error.";
         let errorStatus = 500;
+
+       
         if (typeof deepgramError === 'object' && deepgramError !== null) {
-            const dgError = deepgramError as Record<string, unknown>;
-            if (typeof dgError.message === 'string') errorDetails = dgError.message;
-          
-            if (typeof dgError.status === 'number') errorStatus = dgError.status;
+           
+            const dgErrorObject = deepgramError as unknown as Record<string, unknown>;
+
+            if (typeof dgErrorObject.message === 'string') {
+                errorDetails = dgErrorObject.message;
+            }
+        
+            if (typeof dgErrorObject.status === 'number') {
+                errorStatus = dgErrorObject.status;
+            }
         } else if (typeof deepgramError === 'string') {
             errorDetails = deepgramError;
         }
