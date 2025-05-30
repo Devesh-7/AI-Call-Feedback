@@ -1,10 +1,16 @@
-// src/app/api/analyze-call/route.ts
-import { NextResponse } from 'next/server';
-// Remove PrerecordedTranscriptionOptions from the import
-import { DeepgramClient } from '@deepgram/sdk';
 
-// Initialize Deepgram client for transcription
-const deepgram = new DeepgramClient(process.env.DEEPGRAM_API_KEY || "");
+import { NextResponse } from 'next/server';
+import { createClient, DeepgramClient } from '@deepgram/sdk'; // Use createClient
+
+
+const deepgramApiKey = process.env.DEEPGRAM_API_KEY;
+if (!deepgramApiKey) {
+  console.error("FATAL: DEEPGRAM_API_KEY environment variable is not set.");
+
+}
+
+const deepgram: DeepgramClient = createClient(deepgramApiKey || "NO_API_KEY_PROVIDED_WILL_FAIL");
+
 
 interface CallEvaluationParameter {
   key: string;
@@ -28,9 +34,10 @@ const callEvaluationParameters: CallEvaluationParameter[] = [
 ];
 
 export async function POST(request: Request) {
-  if (!process.env.DEEPGRAM_API_KEY) {
-    console.error("Deepgram API key is not configured.");
-    return NextResponse.json({ error: "Server configuration error: Missing Deepgram API key." }, { status: 500 });
+  
+  if (!process.env.DEEPGRAM_API_KEY || process.env.DEEPGRAM_API_KEY === "NO_API_KEY_PROVIDED_WILL_FAIL") {
+    console.error("Deepgram API key is not configured properly.");
+    return NextResponse.json({ error: "Server configuration error: Missing or invalid Deepgram API key." }, { status: 500 });
   }
 
   try {
@@ -46,17 +53,15 @@ export async function POST(request: Request) {
     try {
       const audioBuffer = Buffer.from(await audioFile.arrayBuffer());
 
-      
       const transcriptionOptions = {
         model: 'nova-2',
         smart_format: true,
         punctuate: true,
-       
       };
 
       const { result, error: deepgramError } = await deepgram.listen.prerecorded.transcribeFile(
         audioBuffer,
-        transcriptionOptions 
+        transcriptionOptions
       );
 
       if (deepgramError) {
@@ -66,6 +71,7 @@ export async function POST(request: Request) {
         if (typeof deepgramError === 'object' && deepgramError !== null) {
             const dgError = deepgramError as Record<string, unknown>;
             if (typeof dgError.message === 'string') errorDetails = dgError.message;
+          
             if (typeof dgError.status === 'number') errorStatus = dgError.status;
         } else if (typeof deepgramError === 'string') {
             errorDetails = deepgramError;
