@@ -75,19 +75,21 @@ export default function HomePage() {
 
     if (!response.ok) {
       let errorMessage = `API Error: ${response.status} ${response.statusText}`;
-      try {
-        const errorData = await response.json();
-        // Assuming errorData might have a structure like { message: string } or { error: string }
-        // And that errorData itself might be of any type if parsing fails or if it's not structured.
-        if (typeof errorData === 'object' && errorData !== null) {
-            errorMessage = (errorData as any).message || (errorData as any).error || errorMessage;
+      // Inside if (!response.ok) { ... } block in handleProcessClick
+try {
+    const errorData = await response.json();
+    if (typeof errorData === 'object' && errorData !== null) {
+        const message = (errorData as Record<string, unknown>)['message'];
+        const errorProp = (errorData as Record<string, unknown>)['error'];
+        if (typeof message === 'string') {
+            errorMessage = message;
+        } else if (typeof errorProp === 'string') {
+            errorMessage = errorProp;
         }
-      } catch (_e) { // Use _e to indicate it's intentionally not used further in this block
-        // console.warn("Could not parse error response as JSON:", _e); // Optional: log if needed
-        // If parsing fails, errorMessage remains the default response.statusText
-      }
-      throw new Error(errorMessage);
     }
+} catch { // Removed _e as it's not used
+    // Intentionally ignoring JSON parsing error for the error response body
+}
 
     const data: ApiFeedbackResponse = await response.json();
     setFeedback(data);
