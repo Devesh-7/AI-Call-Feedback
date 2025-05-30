@@ -67,47 +67,49 @@ export default function HomePage() {
     const formData = new FormData();
     formData.append('audioFile', selectedFile);
 
-    try {
-       const response = await fetch('/api/analyze-call', {
-      method: 'POST',
-      body: formData,
-    });
+    try { // Outer try
+      const response = await fetch('/api/analyze-call', {
+        method: 'POST',
+        body: formData,
+      });
 
-    if (!response.ok) {
-      let errorMessage = `API Error: ${response.status} ${response.statusText}`;
-      // Inside if (!response.ok) { ... } block in handleProcessClick
-try {
-    const errorData = await response.json();
-    if (typeof errorData === 'object' && errorData !== null) {
-        const message = (errorData as Record<string, unknown>)['message'];
-        const errorProp = (errorData as Record<string, unknown>)['error'];
-        if (typeof message === 'string') {
-            errorMessage = message;
-        } else if (typeof errorProp === 'string') {
-            errorMessage = errorProp;
+      if (!response.ok) { // Check if response is NOT okay
+        let errorMessage = `API Error: ${response.status} ${response.statusText}`;
+        try { // Inner try for parsing potential JSON error body
+          const errorData = await response.json();
+          if (typeof errorData === 'object' && errorData !== null) {
+            const message = (errorData as Record<string, unknown>)['message'];
+            const errorProp = (errorData as Record<string, unknown>)['error'];
+            if (typeof message === 'string') {
+              errorMessage = message;
+            } else if (typeof errorProp === 'string') {
+              errorMessage = errorProp;
+            }
+          }
+        } catch { // Inner catch
+          // Intentionally ignoring JSON parsing error for the error response body
+          // If parsing fails, errorMessage remains the default from response.statusText
         }
-    }
-} catch { // Removed _e as it's not used
-    // Intentionally ignoring JSON parsing error for the error response body
-}
+        throw new Error(errorMessage); // Throw an error to be caught by the outer catch
+      } // This closes the if (!response.ok) block
 
-    const data: ApiFeedbackResponse = await response.json();
-    setFeedback(data);
+      // If response IS okay, proceed to parse data
+      const data: ApiFeedbackResponse = await response.json();
+      setFeedback(data);
 
-  } catch (err) { // Removed ': any'
-    let detailedErrorMessage = "An unexpected error occurred. Please try again.";
-    if (err instanceof Error) {
-        detailedErrorMessage = err.message;
-    } else if (typeof err === 'string') { // Handle if the error thrown was just a string
-        detailedErrorMessage = err;
+    } catch (err) { // Outer catch for all errors (network, thrown from !response.ok, etc.)
+      let detailedErrorMessage = "An unexpected error occurred. Please try again.";
+      if (err instanceof Error) {
+          detailedErrorMessage = err.message;
+      } else if (typeof err === 'string') {
+          detailedErrorMessage = err;
+      }
+      console.error("Failed to process audio catch block:", err); // Log original error for debugging
+      setError(detailedErrorMessage);
+    } finally { // Outer finally
+      setIsLoading(false);
     }
-    // Log the original error object (err) as it might contain more info than just the message
-    console.error("Failed to process audio catch block:", err);
-    setError(detailedErrorMessage);
-  } finally {
-    setIsLoading(false);
-  }
-  };
+  }; 
 
   return (
     <main className={styles.main}>
