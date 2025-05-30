@@ -1,8 +1,7 @@
 // src/app/api/analyze-call/route.ts
 import { NextResponse } from 'next/server';
-import OpenAI from 'openai'; // Re-enable OpenAI import
+import OpenAI from 'openai';
 
-// Re-enable OpenAI client initialization
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -34,11 +33,12 @@ async function getLLMResponse(prompt: string, model: string = "gpt-3.5-turbo"): 
       model: model,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.3,
-      max_tokens: 150,
+      max_tokens: 150, // Adjusted for potentially longer feedback/observation
     });
     return completion.choices[0]?.message?.content?.trim() || "";
   } catch (error) {
-    console.error(`Error calling OpenAI API (${model}):`, error);
+    const modelInError = model || "OpenAI model";
+    console.error(`Error calling ${modelInError}:`, error);
     if (error instanceof OpenAI.APIError && error.status === 429) {
         return "ERROR_QUOTA";
     }
@@ -60,7 +60,7 @@ function parseNumericScore(llmResponseText: string, weight: number, inputType: "
         if (lowerResponse.includes("pass") || lowerResponse.includes("yes") || lowerResponse.includes(String(weight))) return weight;
         if (lowerResponse.includes("fail") || lowerResponse.includes("no") || lowerResponse.includes("0")) return 0;
     }
-    return 0;
+    return 0; // Default if no clear score found
   }
 
   if (inputType === "PASS_FAIL") {
@@ -72,8 +72,8 @@ function parseNumericScore(llmResponseText: string, weight: number, inputType: "
 
 export async function POST(request: Request) {
   if (!process.env.OPENAI_API_KEY) {
-    console.error("OpenAI API key not configured.");
-    return NextResponse.json({ error: "Server configuration error. OpenAI API key is missing." }, { status: 500 });
+    console.error("OpenAI API key not configured on server.");
+    return NextResponse.json({ error: "Server configuration error: OpenAI API key is missing." }, { status: 500 });
   }
 
   try {
@@ -84,8 +84,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "No audio file uploaded." }, { status: 400 });
     }
 
-    // --- Live Transcription with OpenAI Whisper ---
-    console.log(`Transcribing audio file: ${audioFile.name} using Whisper...`);
+    console.log(`Attempting to transcribe audio file: ${audioFile.name}`);
     let transcript = "";
     try {
         const transcriptionResponse = await openai.audio.transcriptions.create({
@@ -96,18 +95,23 @@ export async function POST(request: Request) {
         console.log("Whisper transcription successful.");
     } catch (transcriptionError) {
         console.error("Whisper transcription failed:", transcriptionError);
-        if (transcriptionError instanceof OpenAI.APIError && transcriptionError.status === 429) {
-            return NextResponse.json({ error: "OpenAI API quota exceeded during transcription. Please check your billing.", details: transcriptionError.message }, { status: 429 });
+        if (transcriptionError instanceof OpenAI.APIError) {
+            return NextResponse.json({
+                error: "OpenAI API error during transcription.",
+                details: transcriptionError.message,
+                type: transcriptionError.type, // Include type for better debugging
+                code: transcriptionError.code   // Include code
+            }, { status: transcriptionError.status || 500 });
         }
-        return NextResponse.json({ error: "Audio transcription failed.", details: (transcriptionError as Error).message }, { status: 500 });
+        // For non-OpenAI errors during transcription phase
+        const errorMessage = transcriptionError instanceof Error ? transcriptionError.message : "Unknown transcription error";
+        return NextResponse.json({ error: "Audio transcription failed.", details: errorMessage }, { status: 500 });
     }
-    // --- End of Live Transcription ---
-
 
     const generatedScores: Record<string, number> = {};
     let analysisHadQuotaError = false;
 
-    console.log("Starting AI analysis for scores using GPT...");
+    console.log("Starting AI analysis for scores...");
     for (const param of callEvaluationParameters) {
       const scorePrompt = `You are a call quality analyst. Based on the following transcript, evaluate the parameter: "${param.name}".
 Description: "${param.desc}".
@@ -123,29 +127,22 @@ Strictly provide only the numerical score. Score:`;
       const llmScoreResponse = await getLLMResponse(scorePrompt);
       if (llmScoreResponse === "ERROR_QUOTA") {
           analysisHadQuotaError = true;
-          console.warn(`Quota error for ${param.name}. Score set to 0.`);
+          console.warn(`OpenAI Quota error for parameter ${param.name}. Score set to 0.`);
           generatedScores[param.key] = 0;
-          // If one score fails due to quota, we might want to stop further API calls for scores
-          // to save on potential (non-existent) quota. Or continue and let them default.
-          // For now, we'll just mark the error and let others try, then handle feedback/obs.
       } else if (llmScoreResponse === "ERROR_API") {
-          console.warn(`API error for ${param.name}. Score set to 0.`);
+          console.warn(`OpenAI API error for parameter ${param.name}. Score set to 0.`);
           generatedScores[param.key] = 0;
       } else {
         generatedScores[param.key] = parseNumericScore(llmScoreResponse, param.weight, param.inputType);
       }
-      console.log(`Score for ${param.name}: ${generatedScores[param.key]} (LLM raw: "${llmScoreResponse}")`);
+      console.log(`Parameter: ${param.name}, Score: ${generatedScores[param.key]}, Raw LLM: "${llmScoreResponse}"`);
     }
 
-    let overallFeedback = "Overall feedback could not be generated due to API issues.";
-    let observation = "Observations could not be generated due to API issues.";
+    let overallFeedback = "Overall feedback could not be generated due to API issues during scoring.";
+    let observation = "Observations could not be generated due to API issues during scoring.";
 
-    if (analysisHadQuotaError) {
-        overallFeedback = "Overall feedback not generated due to API quota limits reached during scoring.";
-        observation = "Observations not generated due to API quota limits reached during scoring.";
-    } else {
-        // Only proceed if no quota errors during scoring
-        console.log("Generating overall feedback with GPT...");
+    if (!analysisHadQuotaError) {
+        console.log("Generating overall feedback...");
         const feedbackPrompt = `Based on the following call transcript, provide a concise overall feedback (1-2 sentences) for the agent's performance.
 Transcript:
 """
@@ -153,9 +150,11 @@ ${transcript}
 """
 Overall Feedback:`;
         overallFeedback = await getLLMResponse(feedbackPrompt);
-        if (overallFeedback.startsWith("ERROR_")) overallFeedback = "Overall feedback generation failed due to API error.";
+        if (overallFeedback.startsWith("ERROR_")) {
+            overallFeedback = "Overall feedback generation failed (API error).";
+        }
 
-        console.log("Generating observation with GPT...");
+        console.log("Generating observation...");
         const observationPrompt = `Based on the following call transcript, provide a concise observation (1-2 sentences) about key events or customer sentiments.
 Transcript:
 """
@@ -163,7 +162,9 @@ ${transcript}
 """
 Observation:`;
         observation = await getLLMResponse(observationPrompt);
-        if (observation.startsWith("ERROR_")) observation = "Observation generation failed due to API error.";
+        if (observation.startsWith("ERROR_")) {
+            observation = "Observation generation failed (API error).";
+        }
     }
 
     const apiResponse = {
@@ -175,8 +176,22 @@ Observation:`;
 
     return NextResponse.json(apiResponse, { status: 200 });
 
-  } catch (error: any) { // Catch for unexpected errors in the main POST function
-    console.error("Critical unexpected error in /api/analyze-call:", error.message);
-    return NextResponse.json({ error: "An unexpected server error occurred.", details: error.message }, { status: 500 });
+  } catch (error) { // This is the main catch block for the POST function
+    const rawErrorMessage = error instanceof Error ? error.message : String(error);
+    console.error("Critical unexpected error in POST /api/analyze-call:", rawErrorMessage, error); // Log the full error too
+
+    if (error instanceof OpenAI.APIError) {
+        return NextResponse.json({
+            error: "OpenAI API Error (uncaught in specific handler)",
+            details: error.message,
+            type: error.type,
+            code: error.code
+        }, { status: error.status || 500 });
+    }
+
+    return NextResponse.json({
+        error: "An unexpected server error occurred.",
+        details: rawErrorMessage
+    }, { status: 500 });
   }
-}
+} // This brace closes the export async function POST
