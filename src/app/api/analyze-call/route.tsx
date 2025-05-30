@@ -1,10 +1,16 @@
 // src/app/api/analyze-call/route.ts
 import { NextResponse } from 'next/server';
-import OpenAI from 'openai';
+// OpenAI import can be removed if no part of its SDK is used.
+// import OpenAI from 'openai';
+import { DeepgramClient, PrerecordedTranscriptionOptions } from '@deepgram/sdk';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// OpenAI client initialization can be removed if no GPT calls are made.
+// const openai = new OpenAI({
+//   apiKey: process.env.OPENAI_API_KEY,
+// });
+
+// Initialize Deepgram client (for transcription)
+const deepgram = new DeepgramClient(process.env.DEEPGRAM_API_KEY || "");
 
 interface CallEvaluationParameter {
   key: string;
@@ -27,54 +33,18 @@ const callEvaluationParameters: CallEvaluationParameter[] = [
   {key: "fatalToneLanguage", name: "Tone & Language", weight: 15, desc: "No abusive or threatening speech", inputType: "PASS_FAIL" }
 ];
 
-async function getLLMResponse(prompt: string, model: string = "gpt-3.5-turbo"): Promise<string> {
-  try {
-    const completion = await openai.chat.completions.create({
-      model: model,
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.3,
-      max_tokens: 150, // Adjusted for potentially longer feedback/observation
-    });
-    return completion.choices[0]?.message?.content?.trim() || "";
-  } catch (error) {
-    const modelInError = model || "OpenAI model";
-    console.error(`Error calling ${modelInError}:`, error);
-    if (error instanceof OpenAI.APIError && error.status === 429) {
-        return "ERROR_QUOTA";
-    }
-    return "ERROR_API";
-  }
-}
-
-function parseNumericScore(llmResponseText: string, weight: number, inputType: "PASS_FAIL" | "SCORE"): number {
-  if (llmResponseText.startsWith("ERROR_")) return 0;
-
-  const numericMatch = llmResponseText.match(/-?\d+/);
-  let score = 0;
-
-  if (numericMatch) {
-    score = parseInt(numericMatch[0], 10);
-  } else {
-    if (inputType === "PASS_FAIL") {
-        const lowerResponse = llmResponseText.toLowerCase();
-        if (lowerResponse.includes("pass") || lowerResponse.includes("yes") || lowerResponse.includes(String(weight))) return weight;
-        if (lowerResponse.includes("fail") || lowerResponse.includes("no") || lowerResponse.includes("0")) return 0;
-    }
-    return 0; // Default if no clear score found
-  }
-
-  if (inputType === "PASS_FAIL") {
-    return score > 0 ? weight : 0;
-  } else {
-    return Math.max(0, Math.min(score, weight));
-  }
-}
+// Helper functions getLLMResponse and parseNumericScore are no longer needed if analysis is fully mocked.
 
 export async function POST(request: Request) {
-  if (!process.env.OPENAI_API_KEY) {
-    console.error("OpenAI API key not configured on server.");
-    return NextResponse.json({ error: "Server configuration error: OpenAI API key is missing." }, { status: 500 });
+  if (!process.env.DEEPGRAM_API_KEY) {
+    console.error("Deepgram API key not configured.");
+    return NextResponse.json({ error: "Server configuration error: Deepgram API key missing." }, { status: 500 });
   }
+  // OpenAI API key check can be removed if not used for analysis.
+  // if (!process.env.OPENAI_API_KEY) {
+  //   console.error("OpenAI API key not configured.");
+  //   return NextResponse.json({ error: "Server configuration error: OpenAI API key missing." }, { status: 500 });
+  // }
 
   try {
     const formData = await request.formData();
@@ -84,114 +54,81 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "No audio file uploaded." }, { status: 400 });
     }
 
-    console.log(`Attempting to transcribe audio file: ${audioFile.name}`);
+    // --- Live Transcription with Deepgram ---
+    console.log(`Transcribing audio file: ${audioFile.name} using Deepgram...`);
     let transcript = "";
     try {
-        const transcriptionResponse = await openai.audio.transcriptions.create({
-            file: audioFile,
-            model: 'whisper-1',
-        });
-        transcript = transcriptionResponse.text;
-        console.log("Whisper transcription successful.");
-    } catch (transcriptionError) {
-        console.error("Whisper transcription failed:", transcriptionError);
-        if (transcriptionError instanceof OpenAI.APIError) {
-            return NextResponse.json({
-                error: "OpenAI API error during transcription.",
-                details: transcriptionError.message,
-                type: transcriptionError.type, // Include type for better debugging
-                code: transcriptionError.code   // Include code
-            }, { status: transcriptionError.status || 500 });
-        }
-        // For non-OpenAI errors during transcription phase
-        const errorMessage = transcriptionError instanceof Error ? transcriptionError.message : "Unknown transcription error";
-        return NextResponse.json({ error: "Audio transcription failed.", details: errorMessage }, { status: 500 });
-    }
+      const audioBuffer = Buffer.from(await audioFile.arrayBuffer());
 
-    const generatedScores: Record<string, number> = {};
-    let analysisHadQuotaError = false;
+      const { result, error: deepgramError } = await deepgram.listen.prerecorded.transcribeFile(
+        audioBuffer,
+        {
+          model: 'nova-2',
+          smart_format: true,
+          punctuate: true,
+        } as PrerecordedTranscriptionOptions
+      );
 
-    console.log("Starting AI analysis for scores...");
-    for (const param of callEvaluationParameters) {
-      const scorePrompt = `You are a call quality analyst. Based on the following transcript, evaluate the parameter: "${param.name}".
-Description: "${param.desc}".
-The transcript is:
-"""
-${transcript}
-"""
-This parameter is of type "${param.inputType}".
-If type is "PASS_FAIL", the score must be either 0 (Fail) or ${param.weight} (Pass).
-If type is "SCORE", the score must be a number between 0 and ${param.weight}.
-Strictly provide only the numerical score. Score:`;
-
-      const llmScoreResponse = await getLLMResponse(scorePrompt);
-      if (llmScoreResponse === "ERROR_QUOTA") {
-          analysisHadQuotaError = true;
-          console.warn(`OpenAI Quota error for parameter ${param.name}. Score set to 0.`);
-          generatedScores[param.key] = 0;
-      } else if (llmScoreResponse === "ERROR_API") {
-          console.warn(`OpenAI API error for parameter ${param.name}. Score set to 0.`);
-          generatedScores[param.key] = 0;
-      } else {
-        generatedScores[param.key] = parseNumericScore(llmScoreResponse, param.weight, param.inputType);
+      if (deepgramError) {
+        console.error("Deepgram transcription error:", deepgramError);
+        // Attempt to get more specific error details from Deepgram if possible
+        const details = typeof deepgramError === 'object' && deepgramError !== null && 'message' in deepgramError ? String((deepgramError as any).message) : String(deepgramError);
+        const status = typeof deepgramError === 'object' && deepgramError !== null && 'status' in deepgramError ? Number((deepgramError as any).status) : 500;
+        return NextResponse.json({ error: "Audio transcription failed (Deepgram).", details }, { status });
       }
-      console.log(`Parameter: ${param.name}, Score: ${generatedScores[param.key]}, Raw LLM: "${llmScoreResponse}"`);
+      
+      transcript = result?.results.channels[0].alternatives[0].transcript || "";
+      console.log("Deepgram transcription successful.");
+
+    } catch (transcriptionError: any) { // Catch any other unexpected errors during Deepgram call
+      console.error("Deepgram transcription process failed unexpectedly:", transcriptionError);
+      const details = transcriptionError.message || String(transcriptionError);
+      return NextResponse.json({ error: "Audio transcription processing error (Deepgram).", details }, { status: 500 });
     }
+    // --- End of Live Transcription with Deepgram ---
 
-    let overallFeedback = "Overall feedback could not be generated due to API issues during scoring.";
-    let observation = "Observations could not be generated due to API issues during scoring.";
+    // --- MOCKED AI Analysis (Scores, Feedback, Observation) ---
+    // This part no longer calls OpenAI GPT due to quota issues.
+    // We use the 'transcript' from Deepgram conceptually but generate mock results.
+    console.log("Using MOCKED analysis results (scores, feedback, observation). Transcript length:", transcript.length);
 
-    if (!analysisHadQuotaError) {
-        console.log("Generating overall feedback...");
-        const feedbackPrompt = `Based on the following call transcript, provide a concise overall feedback (1-2 sentences) for the agent's performance.
-Transcript:
-"""
-${transcript}
-"""
-Overall Feedback:`;
-        overallFeedback = await getLLMResponse(feedbackPrompt);
-        if (overallFeedback.startsWith("ERROR_")) {
-            overallFeedback = "Overall feedback generation failed (API error).";
+    const mockedScores: Record<string, number> = {};
+    callEvaluationParameters.forEach(param => {
+      if (param.inputType === "PASS_FAIL") {
+        // Example: If transcript mentions the parameter description's keywords, pass. (Very basic)
+        // This is just a placeholder for more sophisticated mock logic if needed.
+        if (transcript.toLowerCase().includes(param.desc.split(" ")[0].toLowerCase())) { // check first word of desc
+             mockedScores[param.key] = param.weight;
+        } else {
+             mockedScores[param.key] = Math.random() > 0.4 ? param.weight : 0; // Fallback random
         }
+      } else if (param.inputType === "SCORE") {
+        mockedScores[param.key] = Math.floor(Math.random() * (param.weight * 0.7)) + Math.floor(param.weight * 0.3); // Score generally > 30%
+      }
+    });
+    // Override some for consistency in mock
+    mockedScores["greeting"] = transcript.toLowerCase().startsWith("hello") || transcript.toLowerCase().startsWith("hi") ? 5 : 0;
+    mockedScores["callEtiquette"] = 10 + Math.floor(Math.random() * 6); // Score between 10-15
 
-        console.log("Generating observation...");
-        const observationPrompt = `Based on the following call transcript, provide a concise observation (1-2 sentences) about key events or customer sentiments.
-Transcript:
-"""
-${transcript}
-"""
-Observation:`;
-        observation = await getLLMResponse(observationPrompt);
-        if (observation.startsWith("ERROR_")) {
-            observation = "Observation generation failed (API error).";
-        }
-    }
+    const overallFeedback = `MOCKED FEEDBACK: Based on the transcript (length ${transcript.length} chars), the agent interaction was evaluated. Key points were noted.`;
+    const observation = `MOCKED OBSERVATION: Key event noted from transcript: first few words were "${transcript.substring(0, 30)}...". Customer sentiment appeared to be neutral to positive.`;
+    // --- End of MOCKED AI Analysis ---
+    
+    // Simulate a small delay as if AI processing happened
+    await new Promise(resolve => setTimeout(resolve, 500)); // Shorter delay now
 
     const apiResponse = {
-      transcript: transcript,
-      scores: generatedScores,
-      overallFeedback: overallFeedback,
-      observation: observation
+      transcript: transcript,       // Real transcript from Deepgram
+      scores: mockedScores,         // Mocked scores
+      overallFeedback: overallFeedback, // Mocked overall feedback
+      observation: observation      // Mocked observation
     };
 
     return NextResponse.json(apiResponse, { status: 200 });
 
-  } catch (error) { // This is the main catch block for the POST function
-    const rawErrorMessage = error instanceof Error ? error.message : String(error);
-    console.error("Critical unexpected error in POST /api/analyze-call:", rawErrorMessage, error); // Log the full error too
-
-    if (error instanceof OpenAI.APIError) {
-        return NextResponse.json({
-            error: "OpenAI API Error (uncaught in specific handler)",
-            details: error.message,
-            type: error.type,
-            code: error.code
-        }, { status: error.status || 500 });
-    }
-
-    return NextResponse.json({
-        error: "An unexpected server error occurred.",
-        details: rawErrorMessage
-    }, { status: 500 });
+  } catch (error: any) { // Main catch block for unexpected errors
+    const rawErrorMessage = error.message || String(error);
+    console.error("Critical unexpected error in POST /api/analyze-call:", rawErrorMessage, error);
+    return NextResponse.json({ error: "An unexpected server error occurred.", details: rawErrorMessage }, { status: 500 });
   }
-} // This brace closes the export async function POST
+}
